@@ -1,136 +1,226 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { dv } from 'data-view';
+import { App, Editor, MarkdownView, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
 
-interface MyPluginSettings {
-	mySetting: string;
+interface NoteTimeTrackerSettings {
+	maxTimeLimit: number;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: NoteTimeTrackerSettings = {
+	maxTimeLimit: 3
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+class NoteTimeView {
+	start: string;
+	finish: string;
+	totalTime: string;
+	sessionStartTime: string;
+
+	initialize(page: Record<string, any>): this {
+		this.start = page.start;
+		this.finish = page.finish;
+		this.totalTime = !!page.totalTime ? page.totalTime.replace("`", "") : page.totalTime;
+		this.sessionStartTime = page.sessionStartTime;
+		return this;
+	}
+
+	toNoteTime(): NoteTime {
+		let ret = new NoteTime();
+		ret.start = !!this.start ? new Date (this.start) : null;
+		ret.finish = !!this.finish ? new Date (this.finish) : null;
+		ret.totalTime = (!!this.totalTime && this.totalTime.trim() != "") ? parseDurationString(this.totalTime) : 0;
+		ret.sessionStartTime = !!this.sessionStartTime ? new Date(`${(new Date).toLocaleString().split(", ")[0]} ${this.sessionStartTime}`) : null;
+		return ret;
+	}
+}
+
+class NoteTime {
+	start: Date | null;
+	finish: Date | null;
+	totalTime: number;
+	sessionStartTime: Date | null;
+
+	toView(): NoteTimeView {
+		let ret = new NoteTimeView();
+		ret.start = !!this.start ? this.start.toLocaleDateString() : "";
+		ret.finish = !!this.finish ? this.finish.toLocaleDateString() : "";
+		ret.totalTime = this.totalTime != null ? `\`${convertMilliSecondsToTimeString(this.totalTime)}\`` : "";
+		ret.sessionStartTime = !!this.sessionStartTime ? this.sessionStartTime.toLocaleTimeString() : "";
+		return ret;
+	}
+}
+
+export default class NoteTimeTrackerPlugin extends Plugin {
+	settings: NoteTimeTrackerSettings;
+	loadSettings = async() => this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	saveSettings = async() => await this.saveData(this.settings);
 
 	async onload() {
 		await this.loadSettings();
+		this.addSettingTab(new SettingTab(this.app, this));
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		this.addCommand({ id: 'start-finish-note-tracking', name: 'Start/Finish Note Tracking', editorCallback: (editor: Editor) => startFinishNoteTracking(this.settings, editor) });
+		this.addCommand({ id: 'start-end-note-session-tracking', name: 'Start/End Note Session Tracking', editorCallback: (editor: Editor) => startEndNoteSession(this.settings, editor) });
 	}
 
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
+/*
+	- if startDate == null, sets the startDate to now
+	- else, 
+		- if sessionStartTime != null and calculatedSessionTime < maxTimeLimit , totalTime += calculatedSessionTime
+		- sets finishDate to now
+*/
+const startFinishNoteTracking = async(settings: NoteTimeTrackerSettings, editor: Editor) =>  {
+	const noteTime = await getCurrentPageNoteTime();
+	// start tracking	
+	if (!noteTime.start) {
+		noteTime.start = new Date();
+	} else { 	// finish tracking
+		// add any oustanding time to totalTime
+		const currentSessoinTime = calculatedSessionTime(noteTime)
+		if (currentSessoinTime < getMaxTimeLimitAsMS(settings)) {
+			noteTime.totalTime += currentSessoinTime;
+		}
+		noteTime.finish = new Date();
+		noteTime.sessionStartTime = null;
 	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+	await saveNoteTimeState(noteTime, editor);
 }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+/*
+	- if startDate == null or finishDate != null, do nothing
+	- else if sessionStartTime == null,  sessionStartTime = now
+	- else if calculatedSessionTime > maxTimeLimit,  sessionStartTime = now
+	- else
+		- totalTime +=  calculatedSessionTime
+		- delete  sessionStartTime
+*/
+const startEndNoteSession = async(settings: NoteTimeTrackerSettings, editor: Editor) =>  {
+	const noteTime = await getCurrentPageNoteTime();
+	if (!noteTime.start || !!noteTime.finish) {
+		console.log("can't start a session if the note tracking hasn't started or has finished");
+	} else if (noteTime.sessionStartTime == null) {
+		noteTime.sessionStartTime = new Date();
+	} else if (calculatedSessionTime(noteTime) > getMaxTimeLimitAsMS(settings)) {
+		noteTime.sessionStartTime = new Date();
+	} else {
+		noteTime.totalTime += calculatedSessionTime(noteTime);
+		noteTime.sessionStartTime = null;
+	}
+	await saveNoteTimeState(noteTime, editor);
+}
 
-	constructor(app: App, plugin: MyPlugin) {
+
+const calculatedSessionTime = (noteTime: NoteTime): number => {
+	return !!noteTime.sessionStartTime ? Date.now() - noteTime.sessionStartTime.getTime() : 0;
+}
+
+const getMaxTimeLimitAsMS = (settings: NoteTimeTrackerSettings)  => settings.maxTimeLimit * 1000 * 60 * 60;
+
+const getCurrentPageNoteTime = async(): Promise<NoteTime> =>  {
+	const file = app.workspace.getActiveFile();
+	if (!file) throw new Error("no file active");
+	const page = (await dv()).page(file.path);
+	if (!page) throw new Error("dataview couldn't pull file");
+	const view = new NoteTimeView().initialize(page);
+	return view.toNoteTime();
+}
+
+/*
+	for each property in notTime, find it's location in the file and save over the value 
+	- will always be the first 4 lines of the file
+*/
+const saveNoteTimeState = async(noteTime: NoteTime, editor: Editor) => {
+	const view = noteTime.toView();
+	Object.keys(view).forEach((prop, idx) => {
+		const value = (view as any)[prop];
+		const line = getPropertyLine(editor, prop);
+		// if (!line) throw new Error(`property ${prop} not found in file`); {}
+		if (!!line) {
+			editor.setLine(line.num, `${prop}::${value}`);
+		} else {
+			const currentText = editor.getLine(idx);
+			editor.setLine(idx, `${prop}::${value}\n${currentText}`);
+		}
+	});
+}
+
+const getPropertyLine = (editor: Editor, propertyName: string): {num: number, text: string}  | null => {
+    const content = editor.getDoc().getValue();
+    const lines = content.split("\n");
+    const num = lines.findIndex((text) => text.startsWith(`${propertyName}::`));
+	if (num === -1) return null;
+    return {
+		num,
+		text: lines[num]
+	};
+}
+
+// created by ChatGPT4
+const convertMilliSecondsToTimeString = (ms: number): string => {
+	const seconds = Math.floor(ms / 1000);
+	const minutes = Math.floor(seconds / 60);
+	const hours = Math.floor(minutes / 60);
+	const days = Math.floor(hours / 24);
+	
+	const secondsRemainder = seconds % 60;
+	const minutesRemainder = minutes % 60;
+	const hoursRemainder = hours % 24;
+	
+	const daysString = days > 0 ? `${days} day${days > 1 ? 's' : ''}, ` : '';
+	const hoursString = hoursRemainder > 0 ? `${hoursRemainder} hour${hoursRemainder > 1 ? 's' : ''}, ` : '';
+	const minutesString = minutesRemainder > 0 ? `${minutesRemainder} minute${minutesRemainder > 1 ? 's' : ''}, ` : '';
+	const secondsString = secondsRemainder > 0 ? `${secondsRemainder} second${secondsRemainder > 1 ? 's' : ''}` : '';
+	
+	return daysString + hoursString + minutesString + secondsString;
+}
+
+function parseDurationString(readableDuration: string) {
+	const parts = readableDuration.split(', ');
+	let days = 0;
+	let hours = 0;
+	let minutes = 0;
+	let seconds = 0;
+	for (const part of parts) {
+	  const [value, unit] = part.split(' ');
+	  if (unit.includes('day')) {
+		days = parseInt(value);
+	  } else if (unit.includes('hour')) {
+		hours = parseInt(value);
+	  } else if (unit.includes('minute')) {
+		minutes = parseInt(value);
+	  } else if (unit.includes('second')) {
+		seconds = parseInt(value);
+	  }
+	}
+	// chatGPT-4 missed the paranthesis around seconds
+	return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
+  }
+
+
+class SettingTab extends PluginSettingTab {
+	plugin: NoteTimeTrackerPlugin;
+
+	constructor(app: App, plugin: NoteTimeTrackerPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
 		const {containerEl} = this;
-
 		containerEl.empty();
-
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
-
+		containerEl.createEl('h2', {text: 'Settings for note time tracking plugin'});
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('Max Time Limit')
+			.setDesc('The session will start over when session tries to end a session that is over the `Max Time Limit`')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Enter `Max Time Limit` in hours')
+				.setValue(this.plugin.settings.maxTimeLimit.toString())
 				.onChange(async (value) => {
 					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.maxTimeLimit = parseInt(value);
 					await this.plugin.saveSettings();
 				}));
 	}

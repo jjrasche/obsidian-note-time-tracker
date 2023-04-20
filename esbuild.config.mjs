@@ -1,3 +1,5 @@
+import { copy } from 'esbuild-plugin-copy';
+
 import esbuild from "esbuild";
 import process from "process";
 import builtins from "builtin-modules";
@@ -9,40 +11,54 @@ if you want to view the source, please visit the github repository of this plugi
 */
 `;
 
-const prod = (process.argv[2] === "production");
+const prod = (process.argv[2] === 'production');
+const test_build = (process.argv[2] === 'test' || process.argv[3] === 'test');
 
-const context = await esbuild.context({
-	banner: {
-		js: banner,
-	},
-	entryPoints: ["main.ts"],
-	bundle: true,
-	external: [
-		"obsidian",
-		"electron",
-		"@codemirror/autocomplete",
-		"@codemirror/collab",
-		"@codemirror/commands",
-		"@codemirror/language",
-		"@codemirror/lint",
-		"@codemirror/search",
-		"@codemirror/state",
-		"@codemirror/view",
-		"@lezer/common",
-		"@lezer/highlight",
-		"@lezer/lr",
-		...builtins],
-	format: "cjs",
-	target: "es2018",
-	logLevel: "info",
-	sourcemap: prod ? false : "inline",
-	treeShaking: true,
-	outfile: "main.js",
-});
-
-if (prod) {
-	await context.rebuild();
-	process.exit(0);
+let entry_point;
+let outfile;
+if (!test_build) {
+	entry_point = 'main.ts';
+	outfile = 'C:/Users/rasche_j/Documents/everything/.obsidian/plugins/obsidian-inline-records/main.js';
 } else {
-	await context.watch();
+	entry_point = 'main.test.ts';
 }
+
+
+
+(async () => {
+	const res = esbuild.build({
+		banner: {
+			js: banner,
+		},
+		entryPoints: [entry_point],
+		bundle: true,
+		external: [
+			'obsidian',
+			'electron',
+			'@codemirror/autocomplete',
+			'@codemirror/collab',
+			'@codemirror/commands',
+			'@codemirror/language',
+			'@codemirror/lint',
+			'@codemirror/search',
+			'@codemirror/state',
+			'@codemirror/view',
+			'@lezer/common',
+			'@lezer/highlight',
+			'@lezer/lr',
+			...builtins],
+		format: 'cjs',
+		target: 'es2018',
+		logLevel: "info",
+		sourcemap: prod ? false : 'inline',
+		treeShaking: true,
+		outfile: outfile,
+		plugins: [
+			copy({
+				assets: [
+					{ from: ['manifest.json'], to: ['manifest.json'] },
+				],
+			}),
+		],
+	})
+})();
