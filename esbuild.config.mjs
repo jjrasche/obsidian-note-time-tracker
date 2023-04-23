@@ -18,7 +18,7 @@ let entry_point;
 let outfile;
 if (!test_build) {
 	entry_point = 'main.ts';
-	outfile = 'C:/Users/rasche_j/Documents/everything/.obsidian/plugins/obsidian-inline-records/main.js';
+	outfile = 'C:/Users/rasche_j/Documents/everything/.obsidian/plugins/obsidian-note-time-tracker/main.js';
 } else {
 	entry_point = 'main.test.ts';
 }

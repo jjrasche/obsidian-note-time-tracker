@@ -1,5 +1,5 @@
 import { dv } from 'data-view';
-import { App, Editor, MarkdownView, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 
 
 interface NoteTimeTrackerSettings {
@@ -19,7 +19,7 @@ class NoteTimeView {
 	initialize(page: Record<string, any>): this {
 		this.start = page.start;
 		this.finish = page.finish;
-		this.totalTime = !!page.totalTime ? page.totalTime.replace("`", "") : page.totalTime;
+		this.totalTime = !!page.totalTime ? page.totalTime.replace(/`/g, "") : page.totalTime;
 		this.sessionStartTime = page.sessionStartTime;
 		return this;
 	}
@@ -44,7 +44,7 @@ class NoteTime {
 		let ret = new NoteTimeView();
 		ret.start = !!this.start ? this.start.toLocaleDateString() : "";
 		ret.finish = !!this.finish ? this.finish.toLocaleDateString() : "";
-		ret.totalTime = this.totalTime != null ? `\`${convertMilliSecondsToTimeString(this.totalTime)}\`` : "";
+		ret.totalTime = this.totalTime != null ? `\`${convertMilliSecondsToDurationString(this.totalTime)}\`` : "";
 		ret.sessionStartTime = !!this.sessionStartTime ? this.sessionStartTime.toLocaleTimeString() : "";
 		return ret;
 	}
@@ -59,12 +59,12 @@ export default class NoteTimeTrackerPlugin extends Plugin {
 		await this.loadSettings();
 		this.addSettingTab(new SettingTab(this.app, this));
 
-		this.addCommand({ id: 'start-finish-note-tracking', name: 'Start/Finish Note Tracking', editorCallback: (editor: Editor) => startFinishNoteTracking(this.settings, editor) });
-		this.addCommand({ id: 'start-end-note-session-tracking', name: 'Start/End Note Session Tracking', editorCallback: (editor: Editor) => startEndNoteSession(this.settings, editor) });
+		this.addCommand({ id: 'start-finish-note-tracking', name: 'Start/Finish Note Tracking', callback: () => startFinishNoteTracking(this.settings) });
+		this.addCommand({ id: 'start-end-note-session-tracking', name: 'Start/End Note Session Tracking', callback: () => startEndNoteSession(this.settings) });
 	}
 
+	convertMilliSecondsToDurationString = (ms: number) => convertMilliSecondsToDurationString(ms);
 }
-
 
 /*
 	- if startDate == null, sets the startDate to now
@@ -72,7 +72,7 @@ export default class NoteTimeTrackerPlugin extends Plugin {
 		- if sessionStartTime != null and calculatedSessionTime < maxTimeLimit , totalTime += calculatedSessionTime
 		- sets finishDate to now
 */
-const startFinishNoteTracking = async(settings: NoteTimeTrackerSettings, editor: Editor) =>  {
+const startFinishNoteTracking = async(settings: NoteTimeTrackerSettings) =>  {
 	const noteTime = await getCurrentPageNoteTime();
 	// start tracking	
 	if (!noteTime.start) {
@@ -86,7 +86,7 @@ const startFinishNoteTracking = async(settings: NoteTimeTrackerSettings, editor:
 		noteTime.finish = new Date();
 		noteTime.sessionStartTime = null;
 	}
-	await saveNoteTimeState(noteTime, editor);
+	await saveNoteTimeState(noteTime);
 }
 
 /*
@@ -97,7 +97,7 @@ const startFinishNoteTracking = async(settings: NoteTimeTrackerSettings, editor:
 		- totalTime +=  calculatedSessionTime
 		- delete  sessionStartTime
 */
-const startEndNoteSession = async(settings: NoteTimeTrackerSettings, editor: Editor) =>  {
+const startEndNoteSession = async(settings: NoteTimeTrackerSettings) =>  {
 	const noteTime = await getCurrentPageNoteTime();
 	if (!noteTime.start || !!noteTime.finish) {
 		console.log("can't start a session if the note tracking hasn't started or has finished");
@@ -109,7 +109,7 @@ const startEndNoteSession = async(settings: NoteTimeTrackerSettings, editor: Edi
 		noteTime.totalTime += calculatedSessionTime(noteTime);
 		noteTime.sessionStartTime = null;
 	}
-	await saveNoteTimeState(noteTime, editor);
+	await saveNoteTimeState(noteTime);
 }
 
 
@@ -119,10 +119,14 @@ const calculatedSessionTime = (noteTime: NoteTime): number => {
 
 const getMaxTimeLimitAsMS = (settings: NoteTimeTrackerSettings)  => settings.maxTimeLimit * 1000 * 60 * 60;
 
-const getCurrentPageNoteTime = async(): Promise<NoteTime> =>  {
+const getFile = (): TFile =>  {
 	const file = app.workspace.getActiveFile();
 	if (!file) throw new Error("no file active");
-	const page = (await dv()).page(file.path);
+	return file;
+}
+
+const getCurrentPageNoteTime = async(): Promise<NoteTime> =>  {
+	const page = (await dv()).page(getFile().path);
 	if (!page) throw new Error("dataview couldn't pull file");
 	const view = new NoteTimeView().initialize(page);
 	return view.toNoteTime();
@@ -131,25 +135,27 @@ const getCurrentPageNoteTime = async(): Promise<NoteTime> =>  {
 /*
 	for each property in notTime, find it's location in the file and save over the value 
 	- will always be the first 4 lines of the file
+	* I want to be able to write in read mode so might need to use adapter instead of editor
 */
-const saveNoteTimeState = async(noteTime: NoteTime, editor: Editor) => {
+const saveNoteTimeState = async(noteTime: NoteTime) => {
 	const view = noteTime.toView();
+	const filePath = getFile().path;
+	let content = await app.vault.adapter.read(filePath);
 	Object.keys(view).forEach((prop, idx) => {
 		const value = (view as any)[prop];
-		const line = getPropertyLine(editor, prop);
-		// if (!line) throw new Error(`property ${prop} not found in file`); {}
+		const line = getPropertyLine(content, prop);
 		if (!!line) {
-			editor.setLine(line.num, `${prop}::${value}`);
+			content = content.replace(line.text, `${prop}::${value}`);
 		} else {
-			const currentText = editor.getLine(idx);
-			editor.setLine(idx, `${prop}::${value}\n${currentText}`);
+			const currentText = getContentLines(content)[idx];
+			content = content.replace(currentText, `${prop}::${value}\n${currentText}`);
 		}
 	});
+	await app.vault.adapter.write(filePath, content);
 }
 
-const getPropertyLine = (editor: Editor, propertyName: string): {num: number, text: string}  | null => {
-    const content = editor.getDoc().getValue();
-    const lines = content.split("\n");
+const getPropertyLine = (content: string, propertyName: string): {num: number, text: string}  | null => {
+    const lines = getContentLines(content);
     const num = lines.findIndex((text) => text.startsWith(`${propertyName}::`));
 	if (num === -1) return null;
     return {
@@ -158,8 +164,10 @@ const getPropertyLine = (editor: Editor, propertyName: string): {num: number, te
 	};
 }
 
+const getContentLines = (content: string): string[] => content.split("\n");
+
 // created by ChatGPT4
-const convertMilliSecondsToTimeString = (ms: number): string => {
+const convertMilliSecondsToDurationString = (ms: number): string => {
 	const seconds = Math.floor(ms / 1000);
 	const minutes = Math.floor(seconds / 60);
 	const hours = Math.floor(minutes / 60);
